@@ -1,17 +1,10 @@
 package com.ankk.fidelity.controller;
 
-import com.ankk.fidelity.httpbeans.BeanAuthentification;
-import com.ankk.fidelity.httpbeans.HistoriqueBean;
-import com.ankk.fidelity.httpbeans.ProduitBean;
-import com.ankk.fidelity.httpbeans.UtilisateurBean;
-import com.ankk.fidelity.model.HistoriqueTransaction;
-import com.ankk.fidelity.model.Produit;
-import com.ankk.fidelity.model.Souscription;
-import com.ankk.fidelity.model.Utilisateur;
-import com.ankk.fidelity.repositories.HistoriqueTransactionRepository;
-import com.ankk.fidelity.repositories.ProduitRepository;
-import com.ankk.fidelity.repositories.SouscriptionRepository;
-import com.ankk.fidelity.repositories.UtilisateurRepository;
+import com.ankk.fidelity.enums.PaiementState;
+import com.ankk.fidelity.httpbeans.*;
+import com.ankk.fidelity.meservices.Firebasemessage;
+import com.ankk.fidelity.model.*;
+import com.ankk.fidelity.repositories.*;
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.firebase.FirebaseApp;
 import com.google.firebase.FirebaseOptions;
@@ -20,20 +13,26 @@ import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.CrossOrigin;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.client.RestTemplate;
+import org.springframework.web.servlet.ModelAndView;
 
 import java.io.IOException;
+import java.text.DecimalFormat;
+import java.time.Clock;
 import java.time.OffsetDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Stream;
 
 @RestController
 @RequiredArgsConstructor
@@ -44,9 +43,17 @@ public class ApiController {
     private final ProduitRepository produitRepository;
     private final SouscriptionRepository souscriptionRepository;
     private final HistoriqueTransactionRepository historiqueTransactionRepository;
+    private final HistoriquePaiementRepository historiquePaiementRepository;
+    private final Firebasemessage firebasemessage;
     @Value("${app.firebase-config}")
     private String firebaseConfig;
     FirebaseApp firebaseApp;
+    @Value("${sfp.wave.token}")
+    private String waveToken;
+    @Value("${sfp.wave.apiurl}")
+    private String waveUrl;
+    @Value("${backend.web.url}")
+    private String backendWebUrl;
 
 
     // Method
@@ -113,6 +120,7 @@ public class ApiController {
                 .echeance(data.getEcheance())
                 .utilisateur(utilisateur)
                 .produit(produit)
+                .paiementState(PaiementState.DEFAULT)
                 .build();
         souscriptionRepository.save(souscription);
 
@@ -123,8 +131,18 @@ public class ApiController {
                 .build();
         historiqueTransactionRepository.save(historiqueTransaction);
 
-        if(userExistAlready.get()){
+        if(userExistAlready.get() && utilisateur.getFcmtoken() != null && !utilisateur.getFcmtoken().isEmpty()){
             // Send NEW PRODUCT and the CALENDAR :
+            FirebasePoliceObject firebasePoliceObject = FirebasePoliceObject.builder()
+                .produit(produit.getLibelle())
+                    .numPolice(souscription.getNumPolice())
+                    .prime(produit.getPrime())
+                    .id(produit.getId().intValue())
+                    .echeance(souscription.getEcheance())
+                    .dateSouscription(souscription.getDateSouscription())
+                    .temps(historiqueTransaction.getCreationDatetime().toInstant().toEpochMilli())
+                    .build();
+            firebasemessage.notifyClientAboutNewPolices(firebasePoliceObject, utilisateur.getFcmtoken());
         }
 
         // Add
@@ -194,4 +212,107 @@ public class ApiController {
                 ResponseEntity.ok(stringMap) :
                 ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
     }
+
+
+    @CrossOrigin("*")
+    @PostMapping(path = "/generatewaveid")
+    public ResponseEntity<?> generatewaveid(
+            @RequestBody WavePaymentRequest data,
+            HttpServletRequest request
+    )
+    {
+        // New LINE :
+        Souscription souscription = souscriptionRepository.findByNumPolice(data.getNumPolice());
+        souscription.setPaiementState(PaiementState.PAIEMENT_EN_COURS);
+        souscriptionRepository.save(souscription);
+        // Hit Historique
+        HistoriquePaiement historiquePaiement = HistoriquePaiement.builder()
+                .montant(data.getAmount())
+                .souscription(souscription)
+                .build();
+        historiquePaiementRepository.save(historiquePaiement);
+
+        Map<String, Object> stringMap = new HashMap<>();
+        HttpHeaders headers = new HttpHeaders();
+        headers.add("Authorization", "Bearer " + waveToken);
+        headers.add("Content-Type", "application/json");
+
+        try {
+            // Call WEB Services :
+            RestTemplate restTemplate = new RestTemplate();
+            WavePaymentOriginalRequest objectRequest = new WavePaymentOriginalRequest();
+            objectRequest.setAmount(data.getAmount());
+            objectRequest.setCurrency(data.getCurrency());
+            objectRequest.setErrorUrl(
+                    backendWebUrl + "trobackend/invalidation/" +
+                            souscription.getId());
+            objectRequest.setSuccessUrl(
+                    backendWebUrl + "trobackend/validation/" +
+                            souscription.getId()
+            );
+
+            HttpEntity<WavePaymentOriginalRequest> entity = new HttpEntity<>(objectRequest, headers);
+            ResponseEntity<WavePaymentResponse> responseEntity = restTemplate.postForEntity(waveUrl,
+                    entity, WavePaymentResponse.class);
+            if (responseEntity.getStatusCode().is2xxSuccessful()) {
+                // Persist :
+                WavePaymentResponse wavePaymentResponse = responseEntity.getBody();
+                stringMap.put("id", wavePaymentResponse.getId());
+                stringMap.put("wave_launch_url", wavePaymentResponse.getWaveLaunchUrl());
+                stringMap.put("reserve", 0);
+                return ResponseEntity.ok(stringMap);
+            }
+        } catch (Exception exc) {
+            System.out.println("Exception (generatewaveid) : " + exc.toString());
+        }
+
+        stringMap.put("id", "");
+        stringMap.put("wave_launch_url", "");
+        stringMap.put("reserve", 0);
+
+        return ResponseEntity.ok(stringMap);
+    }
+
+
+    // M E T H O D S
+    @GetMapping("/validation/{souscriptionId}")
+    public ModelAndView validation(@PathVariable long souscriptionId) {
+        // Find RESERVATION :
+        ModelAndView modelAndView = new ModelAndView();
+        modelAndView.setViewName("validation");
+
+        Souscription souscription = souscriptionRepository.findById(souscriptionId).orElse(null);
+        souscription.setPaiementState(PaiementState.PAIEMENT_EFFECTUE);
+        souscriptionRepository.save(souscription);
+
+        // Find UTILISATEUR :
+        Utilisateur utilisateur = souscription.getUtilisateur();
+        // Find MONTANT :
+        int montant = souscription.getHistoriquePaiements().get(souscription.getHistoriquePaiements().size() - 1).getMontant();
+
+        DecimalFormat formatter = new DecimalFormat("###,###,###"); // ###,###,###.00
+        String resultAmount = formatter.format(montant);
+        modelAndView.addObject(
+                "client",
+                ("Felicitations " + utilisateur.getNom() + " " +
+                        utilisateur.getPrenom())
+        );
+        modelAndView.addObject("montant", (resultAmount + " est effectif !"));
+        modelAndView.addObject("date",
+                OffsetDateTime.now(Clock.systemUTC()).
+                        truncatedTo(ChronoUnit.SECONDS).
+                        format(DateTimeFormatter.ISO_LOCAL_DATE_TIME));
+
+        // Add members :
+        //emailService.addMembersToChannels(Stream.of(utilisateur, owner).toList(), channel_ID);
+
+        // Notify PUBLICATION's curent suscriber :
+        firebasemessage.notifyClientAboutPrimePayment(
+                souscription.getProduit().getLibelle(),
+                souscription.getNumPolice(),
+                utilisateur.getFcmtoken()
+                );
+        return modelAndView;
+    }
+
 }

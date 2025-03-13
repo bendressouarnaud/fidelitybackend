@@ -1,5 +1,6 @@
 package com.ankk.fidelity.meservices;
 
+import com.ankk.fidelity.httpbeans.FirebasePoliceObject;
 import com.ankk.fidelity.model.Utilisateur;
 import com.ankk.fidelity.repositories.UtilisateurRepository;
 import com.google.firebase.messaging.FirebaseMessaging;
@@ -20,33 +21,44 @@ public class Firebasemessage {
     private final UtilisateurRepository utilisateurRepository;
 
     @Async
-    public void notifySuscriberAboutCible(Long iduser){
-        Utilisateur utilisateur = utilisateurRepository.findById(iduser).orElse(null);
-        if(utilisateur != null){
-            Notification builder = new Notification("Nouvelle souscription",
-                    "Annonce modifiée");
-            // ANDROID  :
-            /*Message me = Message.builder()
-                    .setNotification(builder)
-                    .setToken(userToken.getToken())
-                    .putData("type", typeMessage)
-                    .putData("sujet", "1")  // Subject
-                    .putData("id", publication.getId().toString())  // Feed 'Magasin' table :
-                    .putData("userid", String.valueOf(publication.getUtilisateur().getId()))
-                    .putData("villedepart", String.valueOf(publication.getVilleDepart().getId()))
-                    .putData("villedestination", String.valueOf(publication.getVilleDestination().getId()))
-                    .putData("datevoyage", String.valueOf(publication.getDateVoyage().toString()))
-                    .putData("datepublication", String.valueOf(publication.getCreationDatetime().toString()))
-                    .putData("reserve", String.valueOf(publication.getReserve()))
-                    .putData("identifiant", publication.getIdentifiant())
-                    .putData("prix", String.valueOf(publication.getPrix()))
-                    .putData("devise", String.valueOf(publication.getDevise().getId()))
-                    .build();
-            try {
-                FirebaseMessaging.getInstance().send(me);
-            } catch (FirebaseMessagingException e) {
-                System.out.println("FirebaseMessagingException ANDROID : " + e.getMessage());
-            }*/
+    public void notifyClientAboutNewPolices(FirebasePoliceObject object, String fcmToken){
+        Notification builder = new Notification("Nouvelle souscription",
+                "Police d'assurance " + object.getProduit());
+        // ANDROID  :
+        Message me = Message.builder()
+                .setNotification(builder)
+                .setToken(fcmToken)
+                .putData("sujet", "1")
+                .putData("id", String.valueOf(object.getId()))
+                .putData("echeance", String.valueOf(object.getEcheance()))
+                .putData("dateSouscription", String.valueOf(object.getDateSouscription()))
+                .putData("produit", object.getProduit())
+                .putData("numPolice", object.getNumPolice())  // Subject
+                .putData("prime", String.valueOf(object.getPrime()))
+                .putData("temps", String.valueOf(object.getTemps()))
+                .build();
+        try {
+            FirebaseMessaging.getInstance().send(me);
+        } catch (FirebaseMessagingException e) {
+            System.out.println("FirebaseMessagingException ANDROID : " + e.getMessage());
+        }
+    }
+
+    @Async
+    public void notifyClientAboutPrimePayment(String produit, String numPolice, String fcmToken){
+        Notification builder = new Notification("Paiement effectué",
+                "Police d'assurance " + produit);
+        // ANDROID  :
+        Message me = Message.builder()
+                .setNotification(builder)
+                .setToken(fcmToken)
+                .putData("sujet", "2")
+                .putData("numPolice", numPolice)
+                .build();
+        try {
+            FirebaseMessaging.getInstance().send(me);
+        } catch (FirebaseMessagingException e) {
+            System.out.println("FirebaseMessagingException ANDROID : " + e.getMessage());
         }
     }
 
